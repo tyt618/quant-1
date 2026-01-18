@@ -147,6 +147,21 @@ st.markdown("""
         color: #7f8c8d;
         font-weight: 500;
     }
+    
+    /* 标题样式 */
+    h1, h2, h3 {
+        color: #2c3e50;
+        font-weight: 600;
+    }
+    
+    /* 优化器结果卡片高亮 */
+    .opt-highlight {
+        background-color: #e8f4f8;
+        border-left: 4px solid #3498db;
+        padding: 10px;
+        border-radius: 4px;
+        margin-bottom: 10px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -371,16 +386,19 @@ def optimize_parameters(data, allow_cash, min_holding):
                 else:
                     sharpe = 0.0
                 
+                # [新增] 计算年化调仓次数
+                ann_trades = count * (252 / n_days)
+                
                 score = ret / (abs(dd) + 0.05)
-                # 记录所有 3 个参数 + 夏普比率
-                results.append([lb, sm, th, ret, ann_ret, count, dd, sharpe, score])
+                # 记录所有指标：年化调仓次数在 index 6
+                results.append([lb, sm, th, ret, ann_ret, count, ann_trades, dd, sharpe, score])
                 
                 idx += 1
                 if idx % 100 == 0:
                     my_bar.progress(min(idx / total_iters, 1.0))
                     
     my_bar.empty()
-    df_res = pd.DataFrame(results, columns=['周期', '平滑', '阈值', '累计收益', '年化收益', '调仓次数', '最大回撤', '夏普比率', '得分'])
+    df_res = pd.DataFrame(results, columns=['周期', '平滑', '阈值', '累计收益', '年化收益', '调仓次数', '年化调仓', '最大回撤', '夏普比率', '得分'])
     return df_res
 
 # ==========================================
@@ -392,10 +410,14 @@ def main():
         saved_config = load_config()
         st.session_state.params = saved_config
 
+    # 初始化优化结果的 Session State
+    if 'opt_results' not in st.session_state:
+        st.session_state.opt_results = None
+
     with st.sidebar:
         st.title("🎛️ 策略控制台")
         
-        # --- 1. 资产与数据 (移出 Form，恢复实时响应) ---
+        # --- 1. 资产与数据 ---
         st.subheader("1. 资产池配置")
         all_etfs = get_all_etf_list()
         options = all_etfs['display'].tolist() if not all_etfs.empty else DEFAULT_CODES
@@ -424,7 +446,6 @@ def main():
         
         date_mode = st.radio("回测区间", ["全历史", "自定义"], index=0)
         
-        # 初始化日期
         start_date_input = datetime(2018, 1, 1)
         end_date_input = datetime.now()
         
@@ -449,7 +470,7 @@ def main():
 
         st.divider()
         
-        # --- 2. 策略参数 (保留在 Form 中，需确认) ---
+        # --- 2. 策略参数表单 ---
         with st.form(key='settings_form'):
             st.subheader("3. 策略内核参数")
             
@@ -672,9 +693,9 @@ def main():
             display_name = name_map.get(asset, asset)
             st.markdown(f"{i+1}. **{display_name}**: `{score:.2%}`")
 
-    # === 优化引擎 (3D 可视化升级) ===
+    # === 优化引擎 (3D 可视化升级 + 低频筛选 + 一键保存) ===
     with st.expander("🛠️ 策略参数优化引擎 (3D Smart Optimizer)", expanded=False):
-        # [新增] 优化数据源选择
+        # 优化数据源选择
         opt_source = st.radio(
             "优化数据源 (Data Source for Optimization)", 
             ["当前选定区间 (Selected Range)", "全历史数据 (Full History: 2015+)"],
@@ -683,38 +704,87 @@ def main():
         )
         
         if st.button("运行全参数扫描"):
-            # 根据选择决定使用哪份数据进行优化
             data_to_opt = sliced_data if opt_source.startswith("当前") else raw_data
-            
             with st.spinner(f"正在基于 [{opt_source}] 进行全参数高维扫描..."):
                 opt_df = optimize_parameters(data_to_opt, p_allow_cash, p_min_holding)
+                st.session_state.opt_results = opt_df # 存入 Session State
+        
+        # 只有当结果存在时才显示
+        if st.session_state.opt_results is not None:
+            opt_df = st.session_state.opt_results
             
-            # 找两个最佳：最高收益 和 最高夏普
+            # 1. 寻找最佳参数
+            # (A) 收益最高
             best_ret_idx = opt_df['累计收益'].idxmax()
-            best_sharpe_idx = opt_df['夏普比率'].idxmax()
             best_r = opt_df.loc[best_ret_idx]
+            
+            # (B) 夏普最高
+            best_sharpe_idx = opt_df['夏普比率'].idxmax()
             best_s = opt_df.loc[best_sharpe_idx]
             
-            c1, c2, c3 = st.columns([1,1,2])
-            with c1: 
+            # (C) [新增] 最佳低频参数 (年化调仓 <= 20)
+            df_low_freq = opt_df[opt_df['年化调仓'] <= 20]
+            best_low = None
+            if not df_low_freq.empty:
+                best_low = df_low_freq.loc[df_low_freq['累计收益'].idxmax()]
+            
+            # 2. 辅助函数：应用参数并保存
+            def apply_params(row_data):
+                new_params = st.session_state.params.copy()
+                new_params['lookback'] = int(row_data['周期'])
+                new_params['smooth'] = int(row_data['平滑'])
+                new_params['threshold'] = float(row_data['阈值'])
+                st.session_state.params = new_params
+                save_config(new_params)
+                st.toast("✅ 参数已更新并保存！正在重新回测...", icon="💾")
+                time.sleep(1)
+                st.rerun()
+
+            # 3. 结果展示卡片
+            c1, c2, c3 = st.columns(3)
+            
+            with c1:
+                st.markdown('<div class="opt-highlight">🔥 <b>收益优先</b></div>', unsafe_allow_html=True)
                 p_str = f"L{int(best_r['周期'])}/S{int(best_r['平滑'])}/T{best_r['阈值']:.3f}"
-                st.metric("🔥 最佳收益参数", f"{best_r['年化收益']:.1%}", f"Sharpe: {best_r['夏普比率']:.2f} | {p_str}")
-            with c2: 
+                st.write(f"**年化:** `{best_r['年化收益']:.1%}`")
+                st.write(f"**夏普:** `{best_r['夏普比率']:.2f}`")
+                st.write(f"**调仓:** `{best_r['年化调仓']:.1f}次/年`")
+                if st.button("💾 应用此参数 (收益)", key="btn_apply_ret"):
+                    apply_params(best_r)
+
+            with c2:
+                st.markdown('<div class="opt-highlight">💎 <b>夏普优先</b></div>', unsafe_allow_html=True)
                 p_str_s = f"L{int(best_s['周期'])}/S{int(best_s['平滑'])}/T{best_s['阈值']:.3f}"
-                st.metric("💎 最佳夏普参数", f"{best_s['夏普比率']:.2f}", f"年化: {best_s['年化收益']:.1%} | {p_str_s}")
+                st.write(f"**年化:** `{best_s['年化收益']:.1%}`")
+                st.write(f"**夏普:** `{best_s['夏普比率']:.2f}`")
+                st.write(f"**调仓:** `{best_s['年化调仓']:.1f}次/年`")
+                if st.button("💾 应用此参数 (夏普)", key="btn_apply_sharpe"):
+                    apply_params(best_s)
+                    
             with c3:
-                # 3D 散点图
-                st.caption("🌌 参数空间 3D 映射 (X:周期, Y:阈值, Z:平滑, Color:夏普)")
-                fig_3d = px.scatter_3d(
-                    opt_df, 
-                    x='周期', y='阈值', z='平滑',
-                    color='夏普比率', 
-                    color_continuous_scale='Viridis',
-                    hover_data=['年化收益', '最大回撤', '调仓次数'],
-                    opacity=0.8
-                )
-                fig_3d.update_layout(margin=dict(l=0, r=0, b=0, t=0), height=300)
-                st.plotly_chart(fig_3d, use_container_width=True)
+                st.markdown('<div class="opt-highlight">🐢 <b>最佳低频 (<20次/年)</b></div>', unsafe_allow_html=True)
+                if best_low is not None:
+                    p_str_l = f"L{int(best_low['周期'])}/S{int(best_low['平滑'])}/T{best_low['阈值']:.3f}"
+                    st.write(f"**年化:** `{best_low['年化收益']:.1%}`")
+                    st.write(f"**夏普:** `{best_low['夏普比率']:.2f}`")
+                    st.write(f"**调仓:** `{best_low['年化调仓']:.1f}次/年`")
+                    if st.button("💾 应用此参数 (低频)", key="btn_apply_low"):
+                        apply_params(best_low)
+                else:
+                    st.warning("无满足条件的组合")
+
+            # 3D 散点图
+            st.caption("🌌 参数空间 3D 映射 (X:周期, Y:阈值, Z:平滑, Color:年化调仓)")
+            fig_3d = px.scatter_3d(
+                opt_df, 
+                x='周期', y='阈值', z='平滑',
+                color='年化调仓', 
+                color_continuous_scale='Turbo',
+                hover_data=['年化收益', '最大回撤', '夏普比率'],
+                opacity=0.8
+            )
+            fig_3d.update_layout(margin=dict(l=0, r=0, b=0, t=0), height=300)
+            st.plotly_chart(fig_3d, use_container_width=True)
 
     # 报表
     account_ret = df_res['总资产'].iloc[-1] / df_res['投入本金'].iloc[-1] - 1

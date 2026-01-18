@@ -674,8 +674,20 @@ def main():
 
     # === 优化引擎 (3D 可视化升级) ===
     with st.expander("🛠️ 策略参数优化引擎 (3D Smart Optimizer)", expanded=False):
+        # [新增] 优化数据源选择
+        opt_source = st.radio(
+            "优化数据源 (Data Source for Optimization)", 
+            ["当前选定区间 (Selected Range)", "全历史数据 (Full History: 2015+)"],
+            index=0,
+            horizontal=True
+        )
+        
         if st.button("运行全参数扫描"):
-            opt_df = optimize_parameters(sliced_data, p_allow_cash, p_min_holding)
+            # 根据选择决定使用哪份数据进行优化
+            data_to_opt = sliced_data if opt_source.startswith("当前") else raw_data
+            
+            with st.spinner(f"正在基于 [{opt_source}] 进行全参数高维扫描..."):
+                opt_df = optimize_parameters(data_to_opt, p_allow_cash, p_min_holding)
             
             # 找两个最佳：最高收益 和 最高夏普
             best_ret_idx = opt_df['累计收益'].idxmax()

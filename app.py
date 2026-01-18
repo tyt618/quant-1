@@ -32,6 +32,7 @@ DEFAULT_PARAMS = {
     'threshold': 0.005,
     'min_holding': 3,
     'allow_cash': True,
+    'mom_method': 'Risk-Adjusted (稳健)', # 新增默认参数
     'selected_codes': DEFAULT_CODES
 }
 
@@ -245,13 +246,39 @@ def download_market_data(codes_list, end_date_str):
     return data, name_map
 
 # ==========================================
-# 3. 策略内核 (Strategy Core)
+# 3. 策略内核 (Strategy Core) [升级版]
 # ==========================================
 
-def calculate_momentum(data, lookback, smooth):
-    mom = data.pct_change(lookback)
+def calculate_momentum(data, lookback, smooth, method='Classic (普通)'):
+    """
+    高级动量计算引擎
+    """
+    if method == 'Classic (普通)':
+        # 传统ROC: (当前价 / N日前价) - 1
+        mom = data.pct_change(lookback)
+        
+    elif method == 'Risk-Adjusted (稳健)':
+        # 风险调整: 区间收益 / 区间波动率
+        # 波动率越大的资产，需要更高的收益才能获得高评分
+        ret = data.pct_change(lookback)
+        # 计算区间内的日收益率标准差
+        vol = data.pct_change().rolling(lookback).std()
+        # 加上微小值防止除零
+        mom = ret / (vol + 1e-9)
+        
+    elif method == 'MA Distance (趋势)':
+        # 均线乖离: 当前价 / N日均线 - 1
+        # 反映价格相对于趋势的强度，比ROC更平滑
+        ma = data.rolling(lookback).mean()
+        mom = (data / ma) - 1
+        
+    else:
+        mom = data.pct_change(lookback)
+
+    # 统一平滑处理
     if smooth > 1:
         mom = mom.rolling(smooth).mean()
+        
     return mom
 
 def fast_backtest_vectorized(daily_ret, mom_df, threshold, min_holding=1, cost_rate=0.0001, allow_cash=True):
@@ -279,6 +306,8 @@ def fast_backtest_vectorized(daily_ret, mom_df, threshold, min_holding=1, cost_r
         target_idx = curr_idx
         
         # 策略逻辑
+        # 注意：不同Method算出的best_val量级不同，threshold可能需要相应调整
+        # 但相对动量(比较大小)逻辑通用
         if allow_cash and best_val < 0:
             target_idx = -1
         else:
@@ -352,7 +381,9 @@ def calculate_pro_metrics(equity_curve, benchmark_curve, trade_count):
         "Alpha": alpha, "Beta": beta, "Trades": trade_count
     }
 
-def optimize_parameters(data, allow_cash, min_holding):
+def optimize_parameters(data, allow_cash, min_holding, method):
+    # 根据方法动态调整阈值范围建议 (Risk-Adjusted数值通常较大，MA Distance较小)
+    # 这里保持通用范围，靠遍历寻找
     lookbacks = range(20, 31, 1) 
     smooths = range(1, 8, 1)     
     thresholds = np.arange(0.0, 0.013, 0.001)
@@ -362,12 +393,13 @@ def optimize_parameters(data, allow_cash, min_holding):
     results = []
     
     total_iters = len(lookbacks) * len(smooths) * len(thresholds)
-    my_bar = st.progress(0, text="正在进行全参数高维扫描 (含夏普比率计算)...")
+    my_bar = st.progress(0, text=f"正在进行高维参数扫描 ({method})...")
     
     idx = 0
     for lb in lookbacks:
         for sm in smooths:
-            mom = calculate_momentum(data, lb, sm)
+            # 传入 method
+            mom = calculate_momentum(data, lb, sm, method)
             for th in thresholds:
                 ret, dd, equity, count = fast_backtest_vectorized(
                     daily_ret, mom, th, 
@@ -376,7 +408,6 @@ def optimize_parameters(data, allow_cash, min_holding):
                     allow_cash=allow_cash
                 )
                 
-                # 计算夏普比率 (简易版)
                 ann_ret = (1 + ret) ** (252 / n_days) - 1
                 if n_days > 1:
                     eq_s = pd.Series(equity)
@@ -472,6 +503,19 @@ def main():
         with st.form(key='settings_form'):
             st.subheader("3. 策略内核参数")
             
+            # [新增] 动量方法选择器
+            mom_options = ['Classic (普通)', 'Risk-Adjusted (稳健)', 'MA Distance (趋势)']
+            # 兼容旧配置
+            default_mom = st.session_state.params.get('mom_method', 'Risk-Adjusted (稳健)')
+            if default_mom not in mom_options: default_mom = 'Classic (普通)'
+            
+            p_method = st.selectbox(
+                "动量计算逻辑 (Momentum Logic)", 
+                mom_options,
+                index=mom_options.index(default_mom),
+                help="Risk-Adjusted (收益/波动率) 能更好剔除高波动的假突破资产。"
+            )
+            
             c_p1, c_p2 = st.columns(2)
             with c_p1:
                 p_lookback = st.number_input("动量周期", min_value=2, max_value=120, value=st.session_state.params.get('lookback', 25), step=1)
@@ -490,7 +534,8 @@ def main():
         if submit_btn:
             current_params = {
                 'lookback': p_lookback, 'smooth': p_smooth, 'threshold': p_threshold,
-                'min_holding': p_min_holding, 'allow_cash': p_allow_cash, 'selected_codes': selected_codes
+                'min_holding': p_min_holding, 'allow_cash': p_allow_cash, 'selected_codes': selected_codes,
+                'mom_method': p_method # 保存新参数
             }
             if current_params != st.session_state.params:
                 st.session_state.params = current_params
@@ -525,7 +570,10 @@ def main():
         st.stop()
 
     daily_ret_all = raw_data.pct_change().fillna(0)
-    mom_all = calculate_momentum(raw_data, p_lookback, p_smooth)
+    
+    # [修改] 调用带 method 的动量计算
+    mom_method_curr = st.session_state.params.get('mom_method', 'Classic (普通)')
+    mom_all = calculate_momentum(raw_data, p_lookback, p_smooth, mom_method_curr)
     
     mask = (raw_data.index >= start_date) & (raw_data.index <= end_date)
     sliced_data = raw_data.loc[mask]
@@ -649,7 +697,6 @@ def main():
         
         hold_name_display = name_map.get(log_hold, log_hold) if log_hold and log_hold != 'Cash' else 'Cash'
         
-        # [修改] 构造详细的每列数据
         daily_record = {
             "日期": date.strftime('%Y-%m-%d'),
             "当前持仓": hold_name_display,
@@ -659,10 +706,9 @@ def main():
             "总资产": current_total,
         }
         
-        # 将所有标的的当日涨跌幅加入到行数据中
         for code, val in r_today.items():
             col_name = name_map.get(code, code)
-            daily_record[col_name] = val # 保持小数形式以便后续热力图格式化
+            daily_record[col_name] = val
             
         daily_details.append(daily_record)
 
@@ -691,13 +737,15 @@ def main():
         st.markdown(f"""
         <div class="signal-banner">
             <h3 style="margin:0">📌 当前持仓: {hold_name}</h3>
-            <div style="margin-top:10px;">最小持仓限制: {p_min_holding} 天 {lock_msg}</div>
+            <div style="margin-top:5px; font-size: 0.9rem">
+                逻辑: {mom_method_curr} | 最小持仓: {p_min_holding} 天 {lock_msg}
+            </div>
         </div>""", unsafe_allow_html=True)
     with col_sig2:
         st.markdown("**🏆 实时排名**")
         for i, (asset, score) in enumerate(latest_mom.head(3).items()):
             display_name = name_map.get(asset, asset)
-            st.markdown(f"{i+1}. **{display_name}**: `{score:.2%}`")
+            st.markdown(f"{i+1}. **{display_name}**: `{score:.2%}`") # 不同逻辑Score意义不同，但%显示相对通用
 
     # === 优化引擎 (3D 可视化升级 + 低频筛选 + 一键保存) ===
     with st.expander("🛠️ 策略参数优化引擎 (3D Smart Optimizer)", expanded=False):
@@ -711,8 +759,9 @@ def main():
         
         if st.button("运行全参数扫描"):
             data_to_opt = sliced_data if opt_source.startswith("当前") else raw_data
-            with st.spinner(f"正在基于 [{opt_source}] 进行全参数高维扫描..."):
-                opt_df = optimize_parameters(data_to_opt, p_allow_cash, p_min_holding)
+            # [修改] 传入当前的 momentum method
+            with st.spinner(f"正在基于 [{opt_source}] 进行全参数高维扫描 (Method: {mom_method_curr})..."):
+                opt_df = optimize_parameters(data_to_opt, p_allow_cash, p_min_holding, mom_method_curr)
                 st.session_state.opt_results = opt_df # 存入 Session State
         
         # 只有当结果存在时才显示
@@ -747,7 +796,6 @@ def main():
             # 3. 结果展示卡片
             c1, c2, c3 = st.columns(3)
             
-            # 检测是否参数相同
             is_same = (int(best_r['周期']) == int(best_s['周期']) and int(best_r['平滑']) == int(best_s['平滑']) and best_r['阈值'] == best_s['阈值'])
             note_str = " (参数重合)" if is_same else ""
 
@@ -766,7 +814,7 @@ def main():
                 st.write(f"**年化:** `{best_s['年化收益']:.1%}`")
                 st.write(f"**夏普:** `{best_s['夏普比率']:.2f}`")
                 st.write(f"**调仓:** `{best_s['年化调仓']:.1f}次/年`")
-                if not is_same: # 如果不同才显示按钮，或者为了方便都显示
+                if not is_same: 
                     if st.button("💾 应用 (夏普)", key="btn_apply_sharpe"):
                         apply_params(best_s)
                 else:
@@ -887,10 +935,8 @@ def main():
         if not df_details.empty:
             df_details['段内收益'] = df_details['段内收益'] * 100
             
-            # [关键] 动态获取所有标的列名
             asset_cols = [col for col in df_details.columns if col not in ["日期", "当前持仓", "持仓天数", "段内收益", "操作", "总资产", "全市场表现"]]
             
-            # 格式化配置
             col_config = {
                 "持仓天数": st.column_config.NumberColumn("持仓天数", help="当前连续持仓天数"),
                 "段内收益": st.column_config.NumberColumn("段内收益", help="本段持仓期间的累计收益率", format="%.2f%%"),
@@ -899,15 +945,13 @@ def main():
                 "日期": st.column_config.DateColumn("日期", format="YYYY-MM-DD"),
             }
             
-            # 为每个资产列添加百分比格式
             for ac in asset_cols:
                 col_config[ac] = st.column_config.NumberColumn(ac, format="%.2f%%")
 
-            # [UI核心] 应用热力图样式 (红涨绿跌 RdYlGn_r)
             st.dataframe(
                 df_details.sort_values(by="日期", ascending=False).style
-                .format({ac: "{:+.2%}" for ac in asset_cols}) # 格式化资产列
-                .background_gradient(subset=asset_cols, cmap="RdYlGn_r", vmin=-0.03, vmax=0.03), # 颜色映射
+                .format({ac: "{:+.2%}" for ac in asset_cols}) 
+                .background_gradient(subset=asset_cols, cmap="RdYlGn_r", vmin=-0.03, vmax=0.03), 
                 use_container_width=True,
                 column_config=col_config
             )

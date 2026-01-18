@@ -199,7 +199,7 @@ def metric_html(label, value, sub="", color="#2c3e50"):
     """
 
 # ==========================================
-# 2. 数据层 (Data Layer) - 极速历史版
+# 2. 数据层 (Data Layer) - 纯净历史数据版
 # ==========================================
 
 @st.cache_data(ttl=3600*12) 
@@ -211,10 +211,10 @@ def get_all_etf_list():
     except:
         return pd.DataFrame()
 
-@st.cache_data(ttl=3600*4) # 长缓存，提高响应速度
+@st.cache_data(ttl=3600*4)
 def download_market_data(codes_list, end_date_str):
     """
-    纯净历史数据下载，无实时融合逻辑，追求速度与稳定性
+    纯净历史数据下载，不进行实时融合
     """
     start_str = '20150101' 
     price_dict = {}
@@ -233,7 +233,6 @@ def download_market_data(codes_list, end_date_str):
         name_map[code] = name
         
         try:
-            # 标准历史接口
             df = ak.fund_etf_hist_em(symbol=code, period="daily", start_date=start_str, end_date=end_date_str, adjust="qfq")
             if not df.empty:
                 df['日期'] = pd.to_datetime(df['日期'])
@@ -368,8 +367,6 @@ def calculate_pro_metrics(equity_curve, benchmark_curve, trade_count):
     }
 
 def optimize_parameters(data, allow_cash, min_holding):
-    # [修改] 恢复四维参数扫描：方法、周期、平滑、阈值
-    # 即使速度慢一点，也要保证遍历的精细度
     methods = ['Classic (普通)', 'Risk-Adjusted (稳健)', 'MA Distance (趋势)']
     lookbacks = range(20, 31, 1) 
     smooths = range(1, 8, 1)     
@@ -383,11 +380,9 @@ def optimize_parameters(data, allow_cash, min_holding):
     my_bar = st.progress(0, text="正在进行四维全景扫描 (Method/Loop/Smooth/Th)...")
     
     idx = 0
-    # 外层增加 Method 遍历
     for method in methods:
         for lb in lookbacks:
             for sm in smooths:
-                # 针对每种组合计算动量矩阵
                 mom = calculate_momentum(data, lb, sm, method)
                 for th in thresholds:
                     ret, dd, equity, count = fast_backtest_vectorized(
@@ -409,7 +404,6 @@ def optimize_parameters(data, allow_cash, min_holding):
                     ann_trades = count * (252 / n_days)
                     score = ret / (abs(dd) + 0.05)
                     
-                    # 记录 Method
                     results.append([method, lb, sm, th, ret, ann_ret, count, ann_trades, dd, sharpe, score])
                     
                     idx += 1
@@ -417,7 +411,6 @@ def optimize_parameters(data, allow_cash, min_holding):
                         my_bar.progress(min(idx / total_iters, 1.0))
                     
     my_bar.empty()
-    # 增加 '方法' 列
     df_res = pd.DataFrame(results, columns=['方法', '周期', '平滑', '阈值', '累计收益', '年化收益', '调仓次数', '年化调仓', '最大回撤', '夏普比率', '得分'])
     return df_res
 
@@ -465,12 +458,13 @@ def main():
         
         date_mode = st.radio("回测区间", ["全历史", "自定义"], index=0)
         
-        start_date_input = datetime(2018, 1, 1)
+        # [修改] 默认开始时间改为 2021-01-01
+        start_date_input = datetime(2021, 1, 1)
         end_date_input = datetime.now()
         
         if date_mode == "自定义":
             c1, c2 = st.columns(2)
-            start_date_input = c1.date_input("Start", datetime(2019, 1, 1))
+            start_date_input = c1.date_input("Start", datetime(2021, 1, 1))
             end_date_input = c2.date_input("End", datetime.now())
 
         invest_mode = st.radio("投资模式", ["一次性投入 (Lump Sum)", "定期定额 (SIP)"], index=0)

@@ -386,11 +386,9 @@ def optimize_parameters(data, allow_cash, min_holding):
                 else:
                     sharpe = 0.0
                 
-                # [新增] 计算年化调仓次数
                 ann_trades = count * (252 / n_days)
-                
                 score = ret / (abs(dd) + 0.05)
-                # 记录所有指标：年化调仓次数在 index 6
+                
                 results.append([lb, sm, th, ret, ann_ret, count, ann_trades, dd, sharpe, score])
                 
                 idx += 1
@@ -650,15 +648,23 @@ def main():
         total_invested_curve.append(total_invested)
         
         hold_name_display = name_map.get(log_hold, log_hold) if log_hold and log_hold != 'Cash' else 'Cash'
-        daily_details.append({
+        
+        # [修改] 构造详细的每列数据
+        daily_record = {
             "日期": date.strftime('%Y-%m-%d'),
             "当前持仓": hold_name_display,
             "持仓天数": log_days if log_hold != 'Cash' else 0,
             "段内收益": log_ret if log_hold != 'Cash' else 0.0,
             "操作": note,
             "总资产": current_total,
-            "全市场表现": market_perf_str
-        })
+        }
+        
+        # 将所有标的的当日涨跌幅加入到行数据中
+        for code, val in r_today.items():
+            col_name = name_map.get(code, code)
+            daily_record[col_name] = val # 保持小数形式以便后续热力图格式化
+            
+        daily_details.append(daily_record)
 
     df_res = pd.DataFrame({
         '总资产': total_assets_curve,
@@ -714,19 +720,17 @@ def main():
             opt_df = st.session_state.opt_results
             
             # 1. 寻找最佳参数
-            # (A) 收益最高
             best_ret_idx = opt_df['累计收益'].idxmax()
             best_r = opt_df.loc[best_ret_idx]
             
-            # (B) 夏普最高
             best_sharpe_idx = opt_df['夏普比率'].idxmax()
             best_s = opt_df.loc[best_sharpe_idx]
             
-            # (C) [新增] 最佳低频参数 (年化调仓 <= 20)
-            df_low_freq = opt_df[opt_df['年化调仓'] <= 20]
+            # [新增] 低频且高夏普 (Trade < 20)
+            df_low = opt_df[opt_df['年化调仓'] <= 20]
             best_low = None
-            if not df_low_freq.empty:
-                best_low = df_low_freq.loc[df_low_freq['累计收益'].idxmax()]
+            if not df_low.empty:
+                best_low = df_low.loc[df_low['夏普比率'].idxmax()] # 低频里找夏普最高的
             
             # 2. 辅助函数：应用参数并保存
             def apply_params(row_data):
@@ -743,23 +747,30 @@ def main():
             # 3. 结果展示卡片
             c1, c2, c3 = st.columns(3)
             
+            # 检测是否参数相同
+            is_same = (int(best_r['周期']) == int(best_s['周期']) and int(best_r['平滑']) == int(best_s['平滑']) and best_r['阈值'] == best_s['阈值'])
+            note_str = " (参数重合)" if is_same else ""
+
             with c1:
-                st.markdown('<div class="opt-highlight">🔥 <b>收益优先</b></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="opt-highlight">🔥 <b>收益优先</b>{note_str}</div>', unsafe_allow_html=True)
                 p_str = f"L{int(best_r['周期'])}/S{int(best_r['平滑'])}/T{best_r['阈值']:.3f}"
                 st.write(f"**年化:** `{best_r['年化收益']:.1%}`")
                 st.write(f"**夏普:** `{best_r['夏普比率']:.2f}`")
                 st.write(f"**调仓:** `{best_r['年化调仓']:.1f}次/年`")
-                if st.button("💾 应用此参数 (收益)", key="btn_apply_ret"):
+                if st.button("💾 应用 (收益)", key="btn_apply_ret"):
                     apply_params(best_r)
 
             with c2:
-                st.markdown('<div class="opt-highlight">💎 <b>夏普优先</b></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="opt-highlight">💎 <b>夏普优先</b>{note_str}</div>', unsafe_allow_html=True)
                 p_str_s = f"L{int(best_s['周期'])}/S{int(best_s['平滑'])}/T{best_s['阈值']:.3f}"
                 st.write(f"**年化:** `{best_s['年化收益']:.1%}`")
                 st.write(f"**夏普:** `{best_s['夏普比率']:.2f}`")
                 st.write(f"**调仓:** `{best_s['年化调仓']:.1f}次/年`")
-                if st.button("💾 应用此参数 (夏普)", key="btn_apply_sharpe"):
-                    apply_params(best_s)
+                if not is_same: # 如果不同才显示按钮，或者为了方便都显示
+                    if st.button("💾 应用 (夏普)", key="btn_apply_sharpe"):
+                        apply_params(best_s)
+                else:
+                    st.caption("与左侧参数一致")
                     
             with c3:
                 st.markdown('<div class="opt-highlight">🐢 <b>最佳低频 (<20次/年)</b></div>', unsafe_allow_html=True)
@@ -768,7 +779,7 @@ def main():
                     st.write(f"**年化:** `{best_low['年化收益']:.1%}`")
                     st.write(f"**夏普:** `{best_low['夏普比率']:.2f}`")
                     st.write(f"**调仓:** `{best_low['年化调仓']:.1f}次/年`")
-                    if st.button("💾 应用此参数 (低频)", key="btn_apply_low"):
+                    if st.button("💾 应用 (低频)", key="btn_apply_low"):
                         apply_params(best_low)
                 else:
                     st.warning("无满足条件的组合")
@@ -871,14 +882,35 @@ def main():
         st.plotly_chart(fig_m, use_container_width=True)
 
     with tab3:
-        st.markdown("##### 📝 详细交易日记")
+        st.markdown("##### 📝 详细交易日记 (Heatmap Mode)")
         df_details = pd.DataFrame(daily_details)
-        if not df_details.empty: df_details['段内收益'] = df_details['段内收益'] * 100
-        st.dataframe(df_details.sort_values(by="日期", ascending=False).style.format({"总资产": "{:,.2f}"}), use_container_width=True, column_config={
-            "持仓天数": st.column_config.NumberColumn("持仓天数", help="当前连续持仓天数"),
-            "段内收益": st.column_config.NumberColumn("段内收益", help="本段持仓期间的累计收益率", format="%.2f%%"),
-            "操作": st.column_config.TextColumn("调仓操作", width="medium"),
-            "全市场表现": st.column_config.TextColumn("当日全市场表现", width="large")})
+        if not df_details.empty:
+            df_details['段内收益'] = df_details['段内收益'] * 100
+            
+            # [关键] 动态获取所有标的列名
+            asset_cols = [col for col in df_details.columns if col not in ["日期", "当前持仓", "持仓天数", "段内收益", "操作", "总资产", "全市场表现"]]
+            
+            # 格式化配置
+            col_config = {
+                "持仓天数": st.column_config.NumberColumn("持仓天数", help="当前连续持仓天数"),
+                "段内收益": st.column_config.NumberColumn("段内收益", help="本段持仓期间的累计收益率", format="%.2f%%"),
+                "操作": st.column_config.TextColumn("调仓操作", width="medium"),
+                "总资产": st.column_config.NumberColumn("总资产", format="%.2f"),
+                "日期": st.column_config.DateColumn("日期", format="YYYY-MM-DD"),
+            }
+            
+            # 为每个资产列添加百分比格式
+            for ac in asset_cols:
+                col_config[ac] = st.column_config.NumberColumn(ac, format="%.2f%%")
+
+            # [UI核心] 应用热力图样式 (红涨绿跌 RdYlGn_r)
+            st.dataframe(
+                df_details.sort_values(by="日期", ascending=False).style
+                .format({ac: "{:+.2%}" for ac in asset_cols}) # 格式化资产列
+                .background_gradient(subset=asset_cols, cmap="RdYlGn_r", vmin=-0.03, vmax=0.03), # 颜色映射
+                use_container_width=True,
+                column_config=col_config
+            )
 
 if __name__ == "__main__":
     main()

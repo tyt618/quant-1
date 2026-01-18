@@ -851,15 +851,22 @@ def main():
         # 交易日记 (从 daily_details 生成)
         st.markdown("##### 📝 详细交易日记")
         df_details = pd.DataFrame(daily_details)
+        
+        # [修复] 修正显示单位：将小数转换为百分数数值 (0.05 -> 5.0)
+        # 因为 st.column_config.NumberColumn 的 format="%.2f%%" 不会自动乘 100
+        if not df_details.empty:
+            df_details['段内收益'] = df_details['段内收益'] * 100
+        
         # 格式化展示
         st.dataframe(
             df_details.sort_values(by="日期", ascending=False).style.format({
                 "总资产": "{:,.2f}",
-                "段内收益": "{:+.2%}"
+                # "段内收益": "{:+.2f}" # style.format 可以处理，但在 column_config 里处理更统一
             }), 
             use_container_width=True,
             column_config={
                 "持仓天数": st.column_config.NumberColumn("持仓天数", help="当前连续持仓天数"),
+                # 这里 format="%.2f%%" 现在会将 5.0 显示为 5.00%
                 "段内收益": st.column_config.NumberColumn("段内收益", help="本段持仓期间的累计收益率", format="%.2f%%"),
                 "操作": st.column_config.TextColumn("调仓操作", width="medium"),
                 "全市场表现": st.column_config.TextColumn("当日全市场表现", width="large"),

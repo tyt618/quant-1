@@ -199,7 +199,7 @@ def metric_html(label, value, sub="", color="#2c3e50"):
     """
 
 # ==========================================
-# 2. 数据层 (Data Layer) - 纯净历史数据
+# 2. 数据层 (Data Layer) - 极速历史版
 # ==========================================
 
 @st.cache_data(ttl=3600*12) 
@@ -211,10 +211,10 @@ def get_all_etf_list():
     except:
         return pd.DataFrame()
 
-@st.cache_data(ttl=3600*4)
+@st.cache_data(ttl=3600*4) # 长缓存，提高响应速度
 def download_market_data(codes_list, end_date_str):
     """
-    仅下载历史数据，不进行实时融合，确保数据稳定性
+    纯净历史数据下载，无实时融合逻辑，追求速度与稳定性
     """
     start_str = '20150101' 
     price_dict = {}
@@ -231,6 +231,7 @@ def download_market_data(codes_list, end_date_str):
             if not match.empty:
                 name = match.iloc[0]['名称']
         name_map[code] = name
+        
         try:
             # 标准历史接口
             df = ak.fund_etf_hist_em(symbol=code, period="daily", start_date=start_str, end_date=end_date_str, adjust="qfq")
@@ -367,7 +368,8 @@ def calculate_pro_metrics(equity_curve, benchmark_curve, trade_count):
     }
 
 def optimize_parameters(data, allow_cash, min_holding):
-    # [修改] 四维遍历：方法、周期、平滑、阈值
+    # [修改] 恢复四维参数扫描：方法、周期、平滑、阈值
+    # 即使速度慢一点，也要保证遍历的精细度
     methods = ['Classic (普通)', 'Risk-Adjusted (稳健)', 'MA Distance (趋势)']
     lookbacks = range(20, 31, 1) 
     smooths = range(1, 8, 1)     
@@ -377,16 +379,15 @@ def optimize_parameters(data, allow_cash, min_holding):
     n_days = len(daily_ret) 
     results = []
     
-    # 计算总迭代次数用于进度条
     total_iters = len(methods) * len(lookbacks) * len(smooths) * len(thresholds)
     my_bar = st.progress(0, text="正在进行四维全景扫描 (Method/Loop/Smooth/Th)...")
     
     idx = 0
-    # 外层循环遍历方法
+    # 外层增加 Method 遍历
     for method in methods:
         for lb in lookbacks:
             for sm in smooths:
-                # 针对每种组合计算一次动量矩阵
+                # 针对每种组合计算动量矩阵
                 mom = calculate_momentum(data, lb, sm, method)
                 for th in thresholds:
                     ret, dd, equity, count = fast_backtest_vectorized(
@@ -408,7 +409,7 @@ def optimize_parameters(data, allow_cash, min_holding):
                     ann_trades = count * (252 / n_days)
                     score = ret / (abs(dd) + 0.05)
                     
-                    # 结果中增加 Method 字段
+                    # 记录 Method
                     results.append([method, lb, sm, th, ret, ann_ret, count, ann_trades, dd, sharpe, score])
                     
                     idx += 1
@@ -416,6 +417,7 @@ def optimize_parameters(data, allow_cash, min_holding):
                         my_bar.progress(min(idx / total_iters, 1.0))
                     
     my_bar.empty()
+    # 增加 '方法' 列
     df_res = pd.DataFrame(results, columns=['方法', '周期', '平滑', '阈值', '累计收益', '年化收益', '调仓次数', '年化调仓', '最大回撤', '夏普比率', '得分'])
     return df_res
 
@@ -540,7 +542,7 @@ def main():
         st.stop()
         
     with st.spinner("正在加载历史行情数据 (Historical Data Only)..."):
-        # [修改] 恢复为标准的下载函数，不含实时逻辑
+        # [修改] 使用简单的历史下载函数
         raw_data, name_map = download_market_data(selected_codes, end_date.strftime('%Y%m%d'))
         
     if raw_data is None:
@@ -702,12 +704,14 @@ def main():
         lock_msg = f"(已持仓 {days_held} 天)" if last_hold != 'Cash' else ""
         if days_held < p_min_holding and last_hold != 'Cash': lock_msg += " 🔒 **锁定中**"
         
-        # 移除实时数据标签
+        # [修改] 简化显示，移除实时数据标签
+        data_last_date = raw_data.index[-1].strftime('%Y-%m-%d')
+        
         st.markdown(f"""
         <div class="signal-banner">
             <h3 style="margin:0">📌 当前持仓: {hold_name}</h3>
             <div style="margin-top:5px; font-size: 0.9rem">
-                逻辑: {mom_method_curr} | 最小持仓: {p_min_holding} 天 {lock_msg}
+                逻辑: {mom_method_curr} | 最小持仓: {p_min_holding} 天 {lock_msg} | 数据截止: {data_last_date}
             </div>
         </div>""", unsafe_allow_html=True)
         
@@ -717,7 +721,7 @@ def main():
             display_name = name_map.get(asset, asset)
             st.markdown(f"{i+1}. **{display_name}**: `{score:.2%}`")
 
-    # === 优化引擎 (4D 遍历) ===
+    # === 优化引擎 (4D) ===
     with st.expander("🛠️ 策略参数优化引擎 (4D Smart Optimizer)", expanded=False):
         opt_source = st.radio(
             "优化数据源 (Data Source for Optimization)", 
@@ -728,7 +732,7 @@ def main():
         
         if st.button("运行全参数扫描 (Method/L/S/T)"):
             data_to_opt = sliced_data if opt_source.startswith("当前") else raw_data
-            # [修改] optimize_parameters 现在已经内置了 method 循环，不需要手动传 method
+            # [修改] 使用新的不带 method 参数的 optimize_parameters (内部自带循环)
             with st.spinner(f"正在基于 [{opt_source}] 进行四维全景扫描 (约 3000+ 次回测)..."):
                 opt_df = optimize_parameters(data_to_opt, p_allow_cash, p_min_holding)
                 st.session_state.opt_results = opt_df 
@@ -752,7 +756,7 @@ def main():
                 new_params['lookback'] = int(row_data['周期'])
                 new_params['smooth'] = int(row_data['平滑'])
                 new_params['threshold'] = float(row_data['阈值'])
-                new_params['mom_method'] = row_data['方法'] # 更新方法
+                new_params['mom_method'] = row_data['方法']
                 st.session_state.params = new_params
                 save_config(new_params)
                 st.toast("✅ 参数已更新并保存！正在重新回测...", icon="💾")
@@ -760,13 +764,11 @@ def main():
                 st.rerun()
 
             c1, c2, c3 = st.columns(3)
-            # 比较参数时，也要比较方法
+            # 简写 helper
+            def short_method(m): return m.split(" ")[0]
+
             is_same = (best_r['方法'] == best_s['方法'] and int(best_r['周期']) == int(best_s['周期']) and int(best_r['平滑']) == int(best_s['平滑']) and best_r['阈值'] == best_s['阈值'])
             note_str = " (参数重合)" if is_same else ""
-
-            # 提取方法名称的简写，避免太长
-            def short_method(m):
-                return m.split(" ")[0]
 
             with c1:
                 st.markdown(f'<div class="opt-highlight">🔥 <b>收益优先</b>{note_str}</div>', unsafe_allow_html=True)
@@ -805,13 +807,12 @@ def main():
                     st.warning("无满足条件的组合")
 
             st.caption("🌌 参数空间映射 (X:周期, Y:阈值, Color:年化调仓) [已展示全部方法]")
-            # 3D 图表增加 方法 维度的筛选或展示？为了简单，我们还是画所有点
             fig_3d = px.scatter_3d(
                 opt_df, 
                 x='周期', y='阈值', z='平滑',
                 color='年化调仓', 
                 color_continuous_scale='Turbo',
-                symbol='方法', # 使用不同形状表示方法
+                symbol='方法', 
                 hover_data=['年化收益', '最大回撤', '夏普比率', '方法'],
                 opacity=0.8
             )
@@ -846,9 +847,42 @@ def main():
 
     tab1, tab2, tab3 = st.tabs(["📈 综合图表", "📅 年度/月度回报", "📝 交易日记"])
     with tab1:
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
+        # [New] Asset Overlay Selection
+        st.caption("📉 标的走势叠加 (Asset Overlays)")
+        all_assets = sliced_data.columns.tolist()
+        overlay_assets = st.multiselect(
+            "选择要对比的底层资产 (Select Assets to Compare)", 
+            options=all_assets,
+            default=[], 
+            help="选择标的后，其净值曲线将叠加显示在主图中，方便对比策略与单一资产的表现。"
+        )
+
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3], specs=[[{"secondary_y": False}], [{"secondary_y": False}]])
         fig.add_trace(go.Scatter(x=df_res.index, y=df_res['策略净值'], name="策略净值", line=dict(color='#c0392b', width=2)), row=1, col=1)
         fig.add_trace(go.Scatter(x=df_res.index, y=bm_curve, name="基准", line=dict(color='#95a5a6', dash='dash')), row=1, col=1)
+        
+        # Add Asset Traces
+        colors = px.colors.qualitative.Plotly
+        for i, asset in enumerate(overlay_assets):
+            s = sliced_data[asset]
+            # Normalize to 1.0 at start (or first valid) then scale to strategy start? 
+            # Standard comparison: normalize to 1.0 at day 0. Strategy also starts (implied) from 1.0 base.
+            if not s.empty:
+                first_valid = s.first_valid_index()
+                if first_valid:
+                    # Normalize: s / s[0] * strategy[0] (to align starting points visually)
+                    # Strategy net value[0] is (1+ret[0]). Let's align to 1.0 roughly.
+                    base_val = df_res['策略净值'].iloc[0] if not df_res['策略净值'].empty else 1.0
+                    s_norm = (s / s.loc[first_valid]) * base_val
+                    
+                    fig.add_trace(go.Scatter(
+                        x=s.index, y=s_norm, 
+                        name=f"{asset} (Normalized)", 
+                        mode='lines',
+                        line=dict(width=1, dash='dot'),
+                        opacity=0.7
+                    ), row=1, col=1)
+
         drawdown_series = (df_res['策略净值'] - df_res['策略净值'].cummax()) / df_res['策略净值'].cummax()
         fig.add_trace(go.Scatter(x=df_res.index, y=drawdown_series, name="回撤", fill='tozeroy', line=dict(color='#c0392b', width=1)), row=2, col=1)
         
@@ -910,7 +944,6 @@ def main():
             
             asset_cols = sorted([col for col in df_details.columns if col not in ["日期", "当前持仓", "持仓天数", "段内收益", "操作", "总资产", "全市场表现"]])
             
-            # [修改] 对所有资产列也乘以 100，确保显示正确
             for ac in asset_cols:
                 df_details[ac] = df_details[ac] * 100
             

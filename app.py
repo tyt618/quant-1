@@ -368,7 +368,7 @@ def calculate_pro_metrics(equity_curve, benchmark_curve, trade_count):
     }
 
 def optimize_parameters(data, allow_cash, min_holding):
-    # === [关键修改] 精细化步长设置 ===
+    # === [确认] 遍历三个参数：Lookback, Smooth, Threshold ===
     lookbacks = range(20, 31, 1) # 周期步长 1
     smooths = range(1, 8, 1)     # 平滑步长 1 (扩大范围)
     thresholds = np.arange(0.0, 0.013, 0.001) # 阈值步长 0.001
@@ -414,92 +414,107 @@ def main():
         st.session_state.params = saved_config
 
     with st.sidebar:
-        st.title("🎛️ 策略控制台")
-        
-        st.subheader("1. 资产池配置")
-        all_etfs = get_all_etf_list()
-        options = all_etfs['display'].tolist() if not all_etfs.empty else DEFAULT_CODES
-        current_selection_codes = st.session_state.params.get('selected_codes', DEFAULT_CODES)
-        
-        default_display = []
-        if not all_etfs.empty:
-            for code in current_selection_codes:
-                match = all_etfs[all_etfs['代码'] == code]
-                if not match.empty:
-                    default_display.append(match.iloc[0]['display'])
-                else:
-                    for opt in options:
-                        if opt.startswith(code):
-                            default_display.append(opt)
-                            break
-        else:
-            default_display = current_selection_codes
+        # [修改] 使用 Form 表单包裹所有设置，防止自动刷新
+        with st.form(key='settings_form'):
+            st.title("🎛️ 策略控制台")
             
-        valid_defaults = [x for x in default_display if x in options]
-        selected_display = st.multiselect("核心标的池", options, default=valid_defaults)
-        selected_codes = [x.split(" | ")[0] for x in selected_display]
-        
-        st.divider()
-        st.subheader("2. 资金管理")
-        
-        date_mode = st.radio("回测区间", ["全历史", "自定义"], index=0)
-        start_date = datetime(2018, 1, 1)
-        end_date = datetime.now()
-        
-        if date_mode == "自定义":
-            c1, c2 = st.columns(2)
-            start_date = c1.date_input("Start", datetime(2019, 1, 1))
-            end_date = c2.date_input("End", datetime.now())
-            start_date = datetime.combine(start_date, datetime.min.time())
-            end_date = datetime.combine(end_date, datetime.min.time())
+            st.subheader("1. 资产池配置")
+            all_etfs = get_all_etf_list()
+            options = all_etfs['display'].tolist() if not all_etfs.empty else DEFAULT_CODES
+            current_selection_codes = st.session_state.params.get('selected_codes', DEFAULT_CODES)
+            
+            default_display = []
+            if not all_etfs.empty:
+                for code in current_selection_codes:
+                    match = all_etfs[all_etfs['代码'] == code]
+                    if not match.empty:
+                        default_display.append(match.iloc[0]['display'])
+                    else:
+                        for opt in options:
+                            if opt.startswith(code):
+                                default_display.append(opt)
+                                break
+            else:
+                default_display = current_selection_codes
+                
+            valid_defaults = [x for x in default_display if x in options]
+            selected_display = st.multiselect("核心标的池", options, default=valid_defaults)
+            selected_codes = [x.split(" | ")[0] for x in selected_display]
+            
+            st.divider()
+            st.subheader("2. 资金管理")
+            
+            date_mode = st.radio("回测区间", ["全历史", "自定义"], index=0)
+            
+            # 初始化日期 (这里仅用于UI显示默认值)
+            start_date_input = datetime(2018, 1, 1)
+            end_date_input = datetime.now()
+            
+            if date_mode == "自定义":
+                c1, c2 = st.columns(2)
+                start_date_input = c1.date_input("Start", datetime(2019, 1, 1))
+                end_date_input = c2.date_input("End", datetime.now())
 
-        # 定投模式选择
-        invest_mode = st.radio("投资模式", ["一次性投入 (Lump Sum)", "定期定额 (SIP)"], index=0)
-        
-        initial_capital = 100000.0
-        sip_amount = 0.0
-        sip_freq = "None"
-        
-        if invest_mode == "一次性投入 (Lump Sum)":
-            initial_capital = st.number_input("初始本金", value=100000.0, step=10000.0)
-        else:
-            c1, c2 = st.columns(2)
-            initial_capital = c1.number_input("初始底仓", value=10000.0, step=1000.0)
-            sip_amount = c2.number_input("定投金额", value=2000.0, step=500.0)
-            sip_freq = st.selectbox("定投频率", ["每月 (Monthly)", "每周 (Weekly)"], index=0)
+            # 定投模式选择
+            invest_mode = st.radio("投资模式", ["一次性投入 (Lump Sum)", "定期定额 (SIP)"], index=0)
+            
+            initial_capital = 100000.0
+            sip_amount = 0.0
+            sip_freq = "None"
+            
+            if invest_mode == "一次性投入 (Lump Sum)":
+                initial_capital = st.number_input("初始本金", value=100000.0, step=10000.0)
+            else:
+                c1, c2 = st.columns(2)
+                initial_capital = c1.number_input("初始底仓", value=10000.0, step=1000.0)
+                sip_amount = c2.number_input("定投金额", value=2000.0, step=500.0)
+                sip_freq = st.selectbox("定投频率", ["每月 (Monthly)", "每周 (Weekly)"], index=0)
 
-        st.divider()
-        st.subheader("3. 策略内核参数")
-        
-        # [修改] 改为数字输入框，避免拖动不准
-        c_p1, c_p2 = st.columns(2)
-        with c_p1:
-            p_lookback = st.number_input("动量周期 (Lookback)", min_value=2, max_value=120, value=st.session_state.params.get('lookback', 25), step=1)
-        with c_p2:
-            p_smooth = st.number_input("平滑窗口 (Smooth)", min_value=1, max_value=60, value=st.session_state.params.get('smooth', 3), step=1)
+            st.divider()
+            st.subheader("3. 策略内核参数")
             
-        p_threshold = st.number_input("换仓阈值 (Threshold)", 0.0, 0.05, st.session_state.params.get('threshold', 0.005), step=0.001, format="%.3f")
-        
-        st.markdown("---")
-        st.markdown("**🛑 交易频率控制**")
-        # [修改] 改为数字输入框
-        p_min_holding = st.number_input("最小持仓天数 (Min Hold)", min_value=1, max_value=60, value=st.session_state.params.get('min_holding', 3), step=1, help="买入后必须持有的最少交易日数。设置为1即不限制。")
-        
-        p_allow_cash = st.checkbox("启用绝对动量避险 (Cash Protection)", value=st.session_state.params.get('allow_cash', True))
-        
-        current_params = {
-            'lookback': p_lookback, 'smooth': p_smooth, 'threshold': p_threshold,
-            'min_holding': p_min_holding, 'allow_cash': p_allow_cash, 'selected_codes': selected_codes
-        }
-        
-        if current_params != st.session_state.params:
-            st.session_state.params = current_params
-            save_config(current_params)
+            # 改为数字输入框，避免拖动不准
+            c_p1, c_p2 = st.columns(2)
+            with c_p1:
+                p_lookback = st.number_input("动量周期 (Lookback)", min_value=2, max_value=120, value=st.session_state.params.get('lookback', 25), step=1)
+            with c_p2:
+                p_smooth = st.number_input("平滑窗口 (Smooth)", min_value=1, max_value=60, value=st.session_state.params.get('smooth', 3), step=1)
+                
+            p_threshold = st.number_input("换仓阈值 (Threshold)", 0.0, 0.05, st.session_state.params.get('threshold', 0.005), step=0.001, format="%.3f")
             
-        if st.button("🔄 重置默认"):
+            st.markdown("---")
+            st.markdown("**🛑 交易频率控制**")
+            p_min_holding = st.number_input("最小持仓天数 (Min Hold)", min_value=1, max_value=60, value=st.session_state.params.get('min_holding', 3), step=1, help="买入后必须持有的最少交易日数。设置为1即不限制。")
+            
+            p_allow_cash = st.checkbox("启用绝对动量避险 (Cash Protection)", value=st.session_state.params.get('allow_cash', True))
+            
+            # [修改] 提交按钮
+            submit_btn = st.form_submit_button("🚀 确认并运行 (Run Analysis)")
+
+        # 只有点击提交按钮后，才更新 Session State 并运行后续逻辑
+        if submit_btn:
+            current_params = {
+                'lookback': p_lookback, 'smooth': p_smooth, 'threshold': p_threshold,
+                'min_holding': p_min_holding, 'allow_cash': p_allow_cash, 'selected_codes': selected_codes
+            }
+            if current_params != st.session_state.params:
+                st.session_state.params = current_params
+                save_config(current_params)
+        
+        # 重置按钮需在 Form 外部
+        if st.button("🔄 重置默认配置"):
             st.session_state.params = DEFAULT_PARAMS.copy()
             save_config(DEFAULT_PARAMS)
             st.rerun()
+
+    # 处理日期逻辑 (放到 Form 外面处理，因为 date_input 返回的是 date 对象需要转换)
+    start_date = datetime.combine(start_date_input, datetime.min.time()) if isinstance(start_date_input, datetime) == False else start_date_input
+    end_date = datetime.combine(end_date_input, datetime.min.time()) if isinstance(end_date_input, datetime) == False else end_date_input
+    if not isinstance(start_date, datetime): # 处理 date 类型
+         start_date = datetime.combine(start_date, datetime.min.time())
+    if not isinstance(end_date, datetime):
+         end_date = datetime.combine(end_date, datetime.min.time())
+
 
     st.markdown("## 🚀 核心资产轮动策略终端 (Pro Ver.)")
     
